@@ -500,7 +500,7 @@ class SettingsWindow: NSWindow {
             // too far in.
             sidebarScrollView.leadingAnchor.constraint(equalTo: parent.leadingAnchor),
             sidebarScrollView.trailingAnchor.constraint(equalTo: parent.trailingAnchor),
-            sidebarScrollView.bottomAnchor.constraint(equalTo: upgradeButton.topAnchor, constant: -10),
+            sidebarScrollView.bottomAnchor.constraint(equalTo: quitButton.topAnchor, constant: -10),
         ])
     }
 
@@ -508,11 +508,8 @@ class SettingsWindow: NSWindow {
         upgradeButton.target = self
         upgradeButton.action = #selector(upgradeButtonClicked)
         upgradeButton.translatesAutoresizingMaskIntoConstraints = false
+        upgradeButton.isHidden = true
         parent.addSubview(upgradeButton)
-        // Align with the sidebar source-list highlight: the scroll view sits flush against the
-        // sidebar edges and `.sourceList` adds its own ~10pt internal inset, so the highlight
-        // pill ends up at `sidebarHorizontalPadding` from each edge — same as the search field.
-        // The upgrade button matches that same edge.
         let inset = Self.sidebarHorizontalPadding
         NSLayoutConstraint.activate([
             upgradeButton.centerXAnchor.constraint(equalTo: parent.centerXAnchor),

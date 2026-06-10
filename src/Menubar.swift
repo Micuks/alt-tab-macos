@@ -83,27 +83,9 @@ class Menubar {
 
     static func refreshLicenseMenuItems() {
         guard upgradeToProMenuItem != nil else { return }
-        let state = LicenseManager.shared.state
-        switch state {
-        case .trial:
-            toggleUpgradeMenuItem(true)
-            supportProjectMenuItem.isHidden = true
-            myAccountMenuItem.isHidden = true
-        case .pro:
-            toggleUpgradeMenuItem(false)
-            supportProjectMenuItem.isHidden = true
-            myAccountMenuItem.isHidden = false
-        case .proExpired:
-            toggleUpgradeMenuItem(true)
-            supportProjectMenuItem.isHidden = false
-            myAccountMenuItem.isHidden = false
-        case .trialExpired:
-            toggleUpgradeMenuItem(true)
-            supportProjectMenuItem.isHidden = false
-            myAccountMenuItem.isHidden = true
-        }
-        if case .pro = state { return }
-        (upgradeToProMenuItem.view as? UpgradeMenuItemView)?.updateContent(state)
+        toggleUpgradeMenuItem(false)
+        supportProjectMenuItem.isHidden = true
+        myAccountMenuItem.isHidden = true
     }
 
     private static func toggleUpgradeMenuItem(_ show: Bool) {

@@ -28,7 +28,6 @@ class App: AppCenterApplication {
     static var isTerminating = false
     private static var isVeryFirstSummon = true
     private static var pendingShowSettingsWindow = false
-    private static var firstLaunchSettingsObserver: NSObjectProtocol?
     // periphery:ignore
     private static var appCenterDelegate: AppCenterCrash?
     // periphery:ignore
@@ -189,34 +188,8 @@ class App: AppCenterApplication {
     @discardableResult
     private static func showSettingsWindowOnFirstLaunchIfNeeded() -> Bool {
         guard !Preferences.settingsWindowShownOnFirstLaunch else { return false }
-        // If the Day1 Welcome window will be shown on this launch, wait for the user to close it
-        // before showing Settings — otherwise both windows appear stacked.
-        if willShowDay1WelcomeOnAppLaunch() {
-            deferFirstLaunchSettingsUntilDay1WelcomeCloses()
-        } else {
-            showAndCenterSettingsWindowOnFirstLaunch()
-        }
+        showAndCenterSettingsWindowOnFirstLaunch()
         return true
-    }
-
-    /// Mirrors the conditions under which `ProTransitionScheduler.computeNextFireDate()` returns
-    /// "now" for the Welcome prompt. Kept narrow on purpose: the other Day-X prompts are gated by
-    /// trial age and don't fire on the very first launch.
-    private static func willShowDay1WelcomeOnAppLaunch() -> Bool {
-        if case .pro = LicenseManager.shared.state { return false }
-        return !ProTransitionManager.shared.hasSeenWelcome
-    }
-
-    private static func deferFirstLaunchSettingsUntilDay1WelcomeCloses() {
-        firstLaunchSettingsObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification, object: nil, queue: .main) { notification in
-            guard notification.object is Day1WelcomeLetterWindow else { return }
-            if let observer = firstLaunchSettingsObserver {
-                NotificationCenter.default.removeObserver(observer)
-                firstLaunchSettingsObserver = nil
-            }
-            DispatchQueue.main.async { showAndCenterSettingsWindowOnFirstLaunch() }
-        }
     }
 
     /// `showSettingsWindow()` relies on a saved autosave frame to position the window. On first
@@ -425,8 +398,6 @@ class App: AppCenterApplication {
         if QAMenu.graphEnabled { DebugMenu.setEnabled(true) }
         #endif
         UsageStats.prune()
-        ProTransitionManager.shared.onAction = { ProPromptHost.shared.dispatch($0) }
-        ProTransitionManager.shared.onAppLaunchComplete()
         Logger.info { "Finished launching AltTab" }
     }
 }
@@ -446,47 +417,13 @@ extension App: NSApplicationDelegate {
         AXUIElement.setGlobalTimeout()
         Preferences.initialize()
         LicenseManager.shared.onBeforeProUnlock = { ProTransitionManager.shared.onProUnlocked() }
-        LicenseManager.shared.onStateChanged = { state in
+        LicenseManager.shared.onStateChanged = { _ in
             Menubar.refreshLicenseMenuItems()
-            syncLicenseCookie(state: state)
-            ProTransitionManager.shared.onLicenseStateChanged()
-            UpgradeTab.refreshStatus()
-            SettingsWindow.shared?.refreshUpgradeButton()
             if TilesPanel.shared != nil { App.resetPreferencesDependentComponents() }
-            // `isProLocked` reads from state, so a state change implicitly changes the lock.
-            // Notify UI observers so Settings rows repaint their ghost/pro-locked styling.
-            NotificationCenter.default.post(name: ProTransitionManager.proLockStateDidChangeNotification, object: nil)
         }
         LicenseManager.shared.initialize()
         BackgroundWork.preStart()
         SystemPermissions.ensurePermissionsAreGranted()
-    }
-
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            if url.scheme == App.bundleIdentifier {
-                handleCustomUrl(url)
-            }
-        }
-    }
-
-    private func handleCustomUrl(_ url: URL) {
-        guard url.host == "activate",
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let licenseKey = components.queryItems?.first(where: { $0.name == "license_key" })?.value,
-              !licenseKey.isEmpty else {
-            return
-        }
-        UpgradeTab.showAutoActivating(licenseKey)
-        LicenseManager.shared.activate(licenseKey) { result in
-            switch result {
-            case .success:
-                UpgradeTab.showAutoActivationSuccess()
-                App.resetPreferencesDependentComponents()
-            case .failure:
-                UpgradeTab.showAutoActivationFailed(licenseKey)
-            }
-        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
