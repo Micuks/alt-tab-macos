@@ -51,7 +51,7 @@ class Menubar {
         menu.addItem(NSMenuItem.separator())
         addMenuItem(String(format: NSLocalizedString("Quit %@", comment: "%@ is AltTab"), App.name), #selector(NSApplication.terminate(_:)), "q", nil) // "xmark.rectangle" is not necessary; macos automatically recognizes Quit
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.target = self
+        statusItem.button!.target = self
         statusItem.button!.action = #selector(statusItemOnClick)
         statusItem.button!.sendAction(on: [.leftMouseDown, .rightMouseDown])
         // Apply icon prefs eagerly here, while the status item is still being added to the
@@ -130,8 +130,21 @@ class Menubar {
         if let type = NSApp.currentEvent?.type, type != .leftMouseDown {
             App.showUiFromShortcut0()
         } else {
-            statusItem.popUpMenu(Menubar.menu)
+            popUpMenu()
         }
+    }
+
+    /// Replaces `NSStatusItem.popUpStatusItemMenu`, deprecated in 10.14. Neither documented
+    /// alternative works on its own: leaving `statusItem.menu` assigned makes macOS open the menu on
+    /// every click, swallowing the right-click that must show the switcher, and `NSMenu.popUp` puts
+    /// the menu at the wrong place on a status item (it lands over the menubar, offset sideways).
+    /// Assigning the menu only for the duration of a synthesized click keeps the branch above while
+    /// letting AppKit position the menu and highlight the icon. Clearing `menu` on the next line is
+    /// safe because `performClick` doesn't return until menu tracking ends.
+    private static func popUpMenu() {
+        statusItem.menu = menu
+        statusItem.button!.performClick(nil)
+        statusItem.menu = nil
     }
 
     static func menubarIconCallback(_: NSControl?) {
@@ -168,10 +181,21 @@ class Menubar {
 
     private static var badgeDotLayer: CALayer?
 
+    /// `NSStatusBar.system.thickness`: the status item working area, 22pt on every macOS so far
+    /// (the visible menubar is taller since Tahoe, but items stay in a centred 22pt band).
+    /// The artwork is authored at 44pt. Handed over at that size it makes the button 44pt tall,
+    /// and macOS then draws the selection as a tall block overflowing the strip instead of the pill
+    /// every other menubar app gets. Any size <= 22 avoids that and renders identically, because
+    /// `.scaleProportionallyUpOrDown` below refits the image into the 22pt button either way. 22 is
+    /// the one that stays correct if that scaling mode ever changes: 44pt artwork at 22pt is an
+    /// exact 2:1 downscale, so one artboard unit is one device pixel on a retina display.
+    private static let iconSize = CGFloat(22)
+
     static private func loadPreferredIcon() {
         let i = Preferences.menubarIcon.indexAsString
         let image = NSImage(named: "menubar-\(i)")!
         image.isTemplate = i != "2"
+        image.size = NSSize(width: iconSize, height: iconSize)
         statusItem.button!.image = image
         statusItem.isVisible = true
         statusItem.button!.imageScaling = .scaleProportionallyUpOrDown
@@ -382,6 +406,7 @@ private final class MenubarMenuDelegate: NSObject, NSMenuDelegate {
 
 class PermissionCallout: StackView {
     private var label: NSTextField!
+    private var button: NSButton!
 
     convenience init() {
         let label = NSTextField(wrappingLabelWithString: "")
@@ -393,20 +418,40 @@ class PermissionCallout: StackView {
         let button = NSButton()
         button.translatesAutoresizingMaskIntoConstraints = false
         button.attributedTitle = NSAttributedString(string: NSLocalizedString("Grant permission", comment: "Menubar callout button"), attributes: [NSAttributedString.Key.foregroundColor: NSColor.white])
-        button.onAction = { _ in
-            Preferences.remove("screenRecordingPermissionSkipped")
-            App.restart()
-        }
         self.init([label, button], .vertical, true, top: 8, right: 15, bottom: 10, left: 15)
         self.label = label
+        self.button = button
         wantsLayer = true
         layer!.backgroundColor = NSColor.purple.cgColor
+    }
+
+    // NSControl target/action never fires inside an NSMenuItem custom view: the menu's modal
+    // tracking loop swallows the click before the button's own mouse-tracking can call sendAction.
+    // So we route the click through the container exactly like `UpgradeMenuItemView` — `hitTest`
+    // keeps the button visual-only, and `mouseUp` runs the action and dismisses the menu. (#5771)
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) != nil ? self : nil
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+        guard button.frame.contains(location) else { return }
+        enclosingMenuItem?.menu?.cancelTracking()
+        Preferences.remove("screenRecordingPermissionSkipped")
+        App.restart()
     }
 
     // Name only the feature(s) the user actually enabled, so we never promise back a feature they
     // don't use. The wrapped label's height depends on the message, so re-fit after setting it.
     func update(_ dependentFeatures: PermissionCalloutResolver.DependentFeatures) {
         label.stringValue = PermissionCallout.message(dependentFeatures)
+        // The earlier fit() pinned our height with a required constraint sized for the previous
+        // (initially empty) message. While it stays active, fittingSize keeps reporting that stale
+        // height, so re-fitting can't grow to fit the new text and the last line clips. Drop the
+        // self-imposed size constraints first so fit() measures the real content. (#5771)
+        constraints.filter {
+            ($0.firstAnchor == widthAnchor || $0.firstAnchor == heightAnchor) && $0.secondAnchor == nil
+        }.forEach { $0.isActive = false }
         fit()
     }
 

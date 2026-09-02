@@ -19,6 +19,14 @@ extension NSImage {
     }
 }
 
+// Stub so SwitcherSession.swift's Preview-frame cache compiles in the test target. The real enum
+// lives in LightImageView.swift (not in the test target); the session only stores and returns
+// values, so mirroring the cases without the helper methods is enough.
+enum CALayerContents {
+    case cgImage(CGImage?)
+    case pixelBuffer(CVPixelBuffer?)
+}
+
 // Test-target reimplementation of `SettingsSearchIndex`'s inline-registration API. The production
 // type lives in the app target but its `sheetSearchableStrings(forButtonAction:)` references the
 // sheet classes + AppearanceTab/ControlsTab selectors, which would drag the whole settings window
@@ -153,6 +161,13 @@ class TilesView {
 }
 
 class ControlsTab {
+    // Fidelity gaps vs production — tests relying on this registry inherit them, so override
+    // entries explicitly when they matter (two conflict-detector bugs hid behind them already):
+    // 1. every hold is the same ⌥, so a conflict that should be found via a shortcut's OWN hold
+    //    is accidentally also found via the other holds (production defaults share this shape;
+    //    use a unique hold like ⌃ to isolate same-index detection);
+    // 2. nextWindowShortcut/nextWindowShortcut2 are stored RAW (⇥, `) while production stores
+    //    them COMBINED with their hold (⌥⇥, ⌥`).
     static let defaultShortcuts = [
         "holdShortcut": ATShortcut(Shortcut(keyEquivalent: "⌥")!, "holdShortcut", .global, .up, 0),
         "holdShortcut2": ATShortcut(Shortcut(keyEquivalent: "⌥")!, "holdShortcut2", .global, .up, 1),

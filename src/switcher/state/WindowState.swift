@@ -14,15 +14,23 @@ import Foundation
 /// without dragging in `Spaces` / SkyLight.
 struct WindowState: Equatable {
     var id: String
-    var isInvisible: Bool
+    var isPhantom: Bool
     var isWindowlessApp: Bool
     var isFullscreen: Bool
     var isMinimized: Bool
     var isTabbed: Bool
+    /// A tab kept visible through the new-tab discovery gap (`Windows.windowsHeldVisibleForTab`). Like
+    /// `isPhantom`/`isTabbed` it is DERIVED (patched into `state` by the live `Window`), never stored raw.
+    /// The switcher's Space/screen filters read it: a held tab just backgrounded on the CURRENT visible
+    /// Space, so it is Space-less (its 1326 landed) yet must still draw one tile — see `WindowFilterResolver`.
+    var isHeldVisibleForTab = false
     var isOnAllSpaces: Bool
     var spaceIds: [UInt64]          // CGSSpaceID === UInt64
     var spaceIndexes: [Int]         // SpaceIndex === Int
     var lastFocusOrder: Int
     var creationOrder: Int
     var title: String
+    // cached AXMain (is this the app's main window). Read off-main with the other window attributes so
+    // `Windows.findMainWindow` reads a flag instead of doing AX IPC in a sort comparator on the show path.
+    var isMainWindow = false
 }

@@ -10,7 +10,7 @@ import Foundation
 enum WindowFilterResolver {
     /// True iff the window passes every active filter. Mirrors the original predicate term-for-term;
     /// `isOnPreferredScreen` is an `@autoclosure` so the (relatively expensive) OS call only fires
-    /// when the short-circuit reaches it — invisible / hidden / windowless windows never trigger it.
+    /// when the short-circuit reaches it — phantom / hidden / windowless windows never trigger it.
     static func shouldShow(_ s: WindowState, _ app: ApplicationState,
                            onlyFrontmostApp: Bool = false,       // appsToShow == .active
                            excludeFrontmostApp: Bool = false,    // appsToShow == .nonActive
@@ -26,8 +26,9 @@ enum WindowFilterResolver {
                            visibleSpaceIds: [UInt64] = [],       // CGSSpaceID === UInt64
                            exceptions: [ExceptionEntry] = [],
                            isOnPreferredScreen: @autoclosure () -> Bool) -> Bool {
-        !s.isInvisible &&
-            !ExceptionMatcher.hidesWindow(s, app, exceptions: exceptions) &&
+        !s.isPhantom &&
+            !ExceptionMatcher.hidesWindow(s, app, exceptions: exceptions,
+                activeAppOverride: onlyFrontmostApp && frontmostPid == app.pid) &&
             !(onlyFrontmostApp && !(frontmostPid == app.pid)) &&
             !(excludeFrontmostApp && frontmostPid == app.pid) &&
             !(hideHidden && app.isHidden) &&
@@ -35,9 +36,16 @@ enum WindowFilterResolver {
                 !s.isWindowlessApp &&
                 !(hideFullscreen && s.isFullscreen) &&
                 !(hideMinimized && s.isMinimized) &&
-                !(onlyVisibleSpaces && !inAnyVisibleSpace(s, visibleSpaceIds)) &&
-                !(onlyNonVisibleSpaces && inAnyVisibleSpace(s, visibleSpaceIds)) &&
-                !(onlyPreferredScreen && !isOnPreferredScreen()) &&
+                // A held tab (kept visible through the new-tab discovery gap) just backgrounded on the
+                // CURRENT visible Space, so it is Space-less yet belongs on-screen. `isPhantom` already
+                // exempts it, but these Space/screen gates are SEPARATE and would still hide it — the exact
+                // vanish that defeated the hold on the FIRST tab of a window, where no group exists yet to
+                // borrow it a Space (live capture 2026-07-24: `(h)…sp[]` dumped with a `-` prefix). Treat
+                // held as "on the visible Space and preferred screen": shows under `.visible`, hidden under
+                // `.nonVisible`, and never dropped by the preferred-screen gate.
+                !(onlyVisibleSpaces && !s.isHeldVisibleForTab && !inAnyVisibleSpace(s, visibleSpaceIds)) &&
+                !(onlyNonVisibleSpaces && (s.isHeldVisibleForTab || inAnyVisibleSpace(s, visibleSpaceIds))) &&
+                !(onlyPreferredScreen && !s.isHeldVisibleForTab && !isOnPreferredScreen()) &&
                 (separateTabs || !s.isTabbed))
     }
 

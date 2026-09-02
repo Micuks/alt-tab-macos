@@ -29,17 +29,20 @@ final class DebugMenu: NSPanel {
         }
     }
 
-    // Queue depths only — each spikes with work and falls back to 0 when idle. focusOrder is the
-    // serial queue behind the #5665 fix; a backlog there is the regression signal.
+    // Queue depths only — each spikes with work and falls back to 0 when idle. cgsCall is the WindowServer
+    // read lane (discovery + per-window state + Space topology); a sustained backlog there is the signal a
+    // slow WindowServer query is starving reads. The AX pools (firstTry/scan/retry) carry the remaining
+    // on-demand AX reads + element acquires.
     private static func makeSamplers() -> [Sampler] {
         let scheduler = AXCallScheduler.shared
         let queues: [LabeledOperationQueue] = [
             BackgroundWork.screenshotsQueue,
             BackgroundWork.accessibilityCommandsQueue,
-            BackgroundWork.focusOrderQueue,
             scheduler.axQueryFirstTryQueue,
             scheduler.axQueryScanQueue,
             scheduler.axQueryRetryQueue,
+            CGSCallScheduler.debugQueue,
+            ProcessCallScheduler.debugQueue,
         ]
         return queues.map { queue in
             Sampler(label: queue.strongUnderlyingQueue.label) { Double(queue.operationCount) }
@@ -70,12 +73,25 @@ final class DebugMenu: NSPanel {
         guard timer == nil else { return }
         graphView.reset()
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "debugMenuSampler", qos: .utility))
-        t.schedule(deadline: .now(), repeating: .milliseconds(100))
+        // Sample depth often so short-lived spikes register (off-main, just atomic reads), but coalesce into
+        // a graph frame only ~every 32ms: point count + main-thread redraw scale with the DRAW rate, not the
+        // sample rate, so this stays cheap. We graph the PEAK depth seen since the last frame. ~1ms is the
+        // practical sampling floor — a DispatchSourceTimer can't fire reliably below it and faster just burns
+        // power. Stamp the frame at sample time, not when the main-thread draw runs, so a spike lands at its
+        // true X even if the main thread is briefly busy (otherwise late draws bunch every spike at the edge).
+        let sampleMs = 1, drawEveryNTicks = 32 // 1ms × 32 ≈ 32ms ≈ 30fps draw
+        var peak: [String: Double] = [:]
+        var ticksSinceDraw = 0
+        t.schedule(deadline: .now(), repeating: .milliseconds(sampleMs))
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            var sample: [String: Double] = [:]
-            for s in self.samplers { sample[s.label] = s.read() }
-            DispatchQueue.main.async { self.graphView.addData(sample) }
+            for s in self.samplers { peak[s.label] = max(peak[s.label] ?? 0, s.read()) }
+            ticksSinceDraw += 1
+            guard ticksSinceDraw >= drawEveryNTicks else { return }
+            let frame = peak, sampledAt = Date()
+            peak.removeAll(keepingCapacity: true)
+            ticksSinceDraw = 0
+            DispatchQueue.main.async { self.graphView.addData(frame, at: sampledAt) }
         }
         t.resume()
         timer = t
@@ -93,6 +109,7 @@ private final class QueueGraphView: NSView {
     private var history: [(timestamp: Date, data: [String: Double])] = []
     private var latestCounts: [String: Int] = [:]
     private var orderedQueues: [String] = []
+    private var hiddenSeries: Set<String> = [] // series toggled off by clicking their legend entry
     private var colors: [NSColor] = []
     private var axisYLines: [CTLine] = []
     private var axisYValues: [Int] = []
@@ -118,10 +135,9 @@ private final class QueueGraphView: NSView {
         needsDisplay = true
     }
 
-    func addData(_ data: [String: Double]) {
-        let now = Date()
-        history.append((now, data))
-        trimHistory(now)
+    func addData(_ data: [String: Double], at timestamp: Date) {
+        history.append((timestamp, data))
+        trimHistory(timestamp)
         updateCaches(data)
         needsDisplay = true
     }
@@ -162,6 +178,7 @@ private final class QueueGraphView: NSView {
         let maxY = max(1.0, cachedMaxY)
         for (i, name) in orderedQueues.enumerated() {
             guard i < colors.count else { break }
+            if hiddenSeries.contains(name) { continue }
             ctx.setStrokeColor(colors[i].cgColor)
             ctx.setLineWidth(1)
             var first = true
@@ -180,21 +197,44 @@ private final class QueueGraphView: NSView {
 
     private func drawLegend(in ctx: CGContext) {
         guard !orderedQueues.isEmpty, orderedQueues.count == legendLines.count else { return }
-        let rowsPerColumn = Int(floor((DebugMenu.height - 2*padding) / legendRowHeight))
-        let columnWidth: CGFloat = (bounds.width - 2*padding) /
-            CGFloat(max(1, (orderedQueues.count + rowsPerColumn - 1) / rowsPerColumn))
-        let legendBottom = padding
-        for (i, _) in orderedQueues.enumerated() {
-            let col = CGFloat(i / rowsPerColumn)
-            let row = CGFloat(i % rowsPerColumn)
-            let x = padding / 2 + col * columnWidth
-            let y = legendBottom + (DebugMenu.height - 2*padding) - legendRowHeight*(row + 1)
-            let color = colors[i]
-            ctx.setFillColor(color.cgColor)
-            ctx.fill(CGRect(x: x, y: y, width: 10, height: 10))
-            ctx.textPosition = CGPoint(x: x + 15, y: y - 2)
+        for (i, name) in orderedQueues.enumerated() {
+            let rect = legendItemRect(i)
+            ctx.saveGState()
+            if hiddenSeries.contains(name) { ctx.setAlpha(0.3) } // toggled-off series: dim its legend entry
+            ctx.setFillColor(colors[i].cgColor)
+            ctx.fill(CGRect(x: rect.minX, y: rect.minY + 2, width: 10, height: 10))
+            ctx.textPosition = CGPoint(x: rect.minX + 15, y: rect.minY)
             CTLineDraw(legendLines[i], ctx)
+            ctx.restoreGState()
         }
+    }
+
+    // The clickable band for a legend entry (swatch + label), in the view's bottom-left coords; used both to
+    // lay the legend out and to hit-test clicks. Width is clamped to the label so clicks on the graph area
+    // (which drag the panel) aren't swallowed.
+    private func legendItemRect(_ i: Int) -> CGRect {
+        let rowsPerColumn = max(1, Int(floor((DebugMenu.height - 2*padding) / legendRowHeight)))
+        let columns = max(1, (orderedQueues.count + rowsPerColumn - 1) / rowsPerColumn)
+        let columnWidth = (bounds.width - 2*padding) / CGFloat(columns)
+        let col = CGFloat(i / rowsPerColumn), row = CGFloat(i % rowsPerColumn)
+        let x = padding / 2 + col * columnWidth
+        let y = padding + (DebugMenu.height - 2*padding) - legendRowHeight*(row + 1)
+        let labelWidth = i < legendLines.count ? CGFloat(CTLineGetTypographicBounds(legendLines[i], nil, nil, nil)) : 60
+        return CGRect(x: x, y: y - 2, width: min(columnWidth, 15 + labelWidth + 6), height: legendRowHeight)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    // Click a legend entry to toggle that series; clicks elsewhere keep dragging the panel as before.
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        for i in orderedQueues.indices where legendItemRect(i).contains(p) {
+            hiddenSeries.formSymmetricDifference([orderedQueues[i]])
+            updateMaxY()
+            needsDisplay = true
+            return
+        }
+        window?.performDrag(with: event)
     }
 
     private func distinctColors(count: Int) -> [NSColor] {
@@ -218,7 +258,7 @@ private final class QueueGraphView: NSView {
     private func updateMaxY() {
         var maxY = 1.0
         for entry in history {
-            for value in entry.data.values where value > maxY { maxY = value }
+            for (key, value) in entry.data where !hiddenSeries.contains(key) && value > maxY { maxY = value }
         }
         let next = maxY * 1.1
         if next == cachedMaxY { return }
