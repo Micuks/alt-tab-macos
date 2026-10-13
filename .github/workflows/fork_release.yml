@@ -1,0 +1,122 @@
+name: Fork sync and release
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Build a new fork revision even if the source has not changed
+        type: boolean
+        default: false
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-sync-and-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'Micuks/alt-tab-macos' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      build: ${{ steps.source.outputs.build }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Test fork release tooling
+        run: python3 -m unittest discover -s scripts/fork -p '*Tests.py'
+      - name: Merge latest official release, preserving patches
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          bash scripts/fork/sync_upstream.sh
+          git push origin HEAD:master
+      - name: Select source and avoid duplicate builds
+        id: source
+        env:
+          REBUILD: ${{ inputs.rebuild || false }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '[.[] | select(.draft == false and .prerelease == false)][0]')
+          build=true
+          if [[ "$REBUILD" != true ]] && jq -e --arg sha "$sha" '.target_commitish == $sha and any(.assets[]; .name == "appcast.xml")' <<< "$latest" >/dev/null; then
+            build=false
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: sync
+    if: needs.sync.outputs.build == 'true'
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          persist-credentials: false
+      - name: Prepare fork versions
+        id: version
+        run: python3 scripts/fork/release.py prepare
+      - name: Select build toolchain
+        run: sudo xcode-select -s /Applications/Xcode_26.0.1.app/Contents/Developer
+      - name: Compile debug app using ai/build.sh
+        run: |
+          cat >> config/local.xcconfig <<'EOF'
+          CODE_SIGN_IDENTITY = -
+          DEVELOPMENT_TEAM =
+          OTHER_CODE_SIGN_FLAGS = --timestamp=none --deep --options runtime
+          EOF
+          bash ai/build.sh
+      - name: Run unit tests, including fork patch checks
+        run: |
+          set -o pipefail
+          xcodebuild test -project alt-tab-macos.xcodeproj -scheme Test -configuration Release -derivedDataPath DerivedData \
+            -skip-testing:unit-tests/LicenseManagerTests | scripts/xcbeautify
+      - name: Build universal release app
+        run: |
+          set -o pipefail
+          xcodebuild -project alt-tab-macos.xcodeproj -scheme Release -configuration Release -derivedDataPath DerivedData \
+            ONLY_ACTIVE_ARCH=NO ARCHS='arm64 x86_64' CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES \
+            DEVELOPMENT_TEAM= OTHER_CODE_SIGN_FLAGS='--timestamp=none --deep --options runtime' | scripts/xcbeautify
+      - name: Sign update archive and generate fork appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          FORK_VERSION: ${{ steps.version.outputs.version }}
+          FORK_TAG: ${{ steps.version.outputs.tag }}
+        run: python3 scripts/fork/release.py package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AltTab-${{ steps.version.outputs.tag }}
+          path: |
+            build/fork-release/*.zip
+            build/fork-release/appcast.xml
+            build/fork-release/SHA256SUMS
+          if-no-files-found: error
+      - name: Publish complete release with its update feed
+        env:
+          FORK_TAG: ${{ steps.version.outputs.tag }}
+          SOURCE_SHA: ${{ needs.sync.outputs.sha }}
+        run: |
+          if draft=$(gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$draft" != true ]]; then exit 0; fi
+            gh release upload "$FORK_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              build/fork-release/*.zip build/fork-release/appcast.xml build/fork-release/SHA256SUMS
+          else
+            gh release create "$FORK_TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "AltTab $FORK_TAG (fork)" \
+              --notes-file build/fork-release/release-notes.md --draft \
+              build/fork-release/*.zip build/fork-release/appcast.xml build/fork-release/SHA256SUMS
+          fi
+          gh release edit "$FORK_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

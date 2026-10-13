@@ -1,5 +1,41 @@
 import XCTest
 
+final class ForkLicenseTests: XCTestCase {
+    func testProRemainsAvailableAfterTrialExpires() {
+        withManager { manager, clock, _, api in
+            manager.initialize()
+            clock.advance(days: 365)
+            manager.refreshState()
+            XCTAssertEqual(manager.state, .pro)
+            XCTAssertTrue(manager.isProAvailable)
+            XCTAssertFalse(manager.isProLocked)
+            XCTAssertTrue(api.validateCalls.isEmpty)
+        }
+    }
+
+    func testInvalidStoredLicenseDoesNotLockForkOrChangeKeychain() {
+        withManager { manager, _, keychain, api in
+            keychain.setValue("existing-key", account: LicenseManager.keychainKeyAccount)
+            manager.defaults.set(false, forKey: "lastValidationResult")
+            manager.initialize()
+            manager.refreshState()
+            XCTAssertEqual(manager.computeState(), .pro)
+            XCTAssertEqual(keychain.value(account: LicenseManager.keychainKeyAccount), "existing-key")
+            XCTAssertTrue(api.validateCalls.isEmpty)
+        }
+    }
+
+    private func withManager(_ body: (LicenseManager, MockClock, MockKeychain, MockLicenseAPI) -> Void) {
+        let suiteName = "com.lwouis.alt-tab-macos.tests.fork-license"
+        let defaults = TestDefaults.make(suiteName)
+        defer { TestDefaults.tearDown(defaults, suiteName) }
+        let clock = MockClock(now: Date(timeIntervalSince1970: 1_700_000_000))
+        let keychain = MockKeychain()
+        let api = MockLicenseAPI()
+        body(LicenseManager(clock: clock, keychain: keychain, api: api, defaults: defaults), clock, keychain, api)
+    }
+}
+
 final class LicenseManagerTests: XCTestCase {
     var clock: MockClock!
     var keychain: MockKeychain!

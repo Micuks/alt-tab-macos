@@ -24,7 +24,7 @@
 
 	<!-- ===== Versioning (substituted from xcconfig; CI overrides via config/local.xcconfig) ===== -->
 	<key>CFBundleShortVersionString</key>
-	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 
@@ -58,8 +58,12 @@
 	</array>
 
 	<!-- ===== Sparkle (auto-update framework — reads these directly from the bundle) ===== -->
+	<key>SUFeedURL</key>
+	<string>https://github.com/Micuks/alt-tab-macos/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>2e9SQOBoaKElchSa/4QDli/nvYkyuDNfynfzBF6vJK4=</string>
+	<string>+ZR3Mdz0j/OxiKaGgsrNulz12OHeQ+7H9iEXQR83z2I=</string>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 	<key>SUEnableAutomaticChecks</key>
 	<string>true</string>
 	<key>SUScheduledCheckInterval</key>
