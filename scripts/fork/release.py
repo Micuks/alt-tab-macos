@@ -48,6 +48,9 @@ def validate_source(root=ROOT):
     require('func capturesAreAllowed' in thumbnails and 'force: true' not in thumbnails, 'Fork background capture policy lost')
     capture = (root / 'src/events/WindowCaptureEvents.swift').read_text()
     require(capture.count('WindowThumbnails.capturesAreAllowed') >= 6, 'Queued captures must recheck live eligibility')
+    applications = (root / 'src/switcher/state/Applications.swift').read_text()
+    require('makeLiveApplication(runningApp, pid)' in applications and 'processIdentifier.isAlive(), !processIdentifier.isZombie()' in applications,
+            'Fork process admission liveness checks lost')
     config = (root / 'config/base.xcconfig').read_text()
     require(re.search(r'^PRODUCT_BUNDLE_IDENTIFIER = ' + re.escape(CONFIG['bundle_id']) + r'$', config, re.M), 'Bundle identifier changed')
     workflow = (root / '.github/workflows/ci_cd.yml').read_text()

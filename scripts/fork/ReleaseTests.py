@@ -14,7 +14,8 @@ import release
 SOURCE_FILES = ['Info.plist', 'src/api/Endpoints.swift', 'src/vendors/SparkleDelegate.swift',
                 'src/pro/license/LicenseManager.swift', 'src/App.swift', 'config/base.xcconfig',
                 '.github/workflows/ci_cd.yml', 'UPSTREAM_TAG.txt',
-                'src/switcher/state/WindowThumbnails.swift', 'src/events/WindowCaptureEvents.swift']
+                'src/switcher/state/WindowThumbnails.swift', 'src/events/WindowCaptureEvents.swift',
+                'src/switcher/state/Applications.swift']
 
 
 def copy_sources(destination):

@@ -95,8 +95,8 @@ class Applications {
     }
 
     static func initialDiscovery() {
-        addInitialRunningApplications()
         RunningApplicationsEvents.observe()
+        addInitialRunningApplications()
     }
 
     static func addInitialRunningApplications() {
@@ -1192,7 +1192,8 @@ class Applications {
         runningApps.forEach { runningApp in
             let bundleIdentifier = runningApp.bundleIdentifier
             guard let processIdentifier = ApplicationPidResolver.resolve(
-                discoveredPid: nil, reportedPid: runningApp.processIdentifier) else { return }
+                discoveredPid: nil, reportedPid: runningApp.processIdentifier),
+                  processIdentifier.isAlive(), !processIdentifier.isZombie() else { return }
             if bundleIdentifier == "com.apple.dock" {
                 DockEvents.observe(processIdentifier)
             }
@@ -1215,8 +1216,20 @@ class Applications {
     // The post-classification half of findOrCreate, for the discovery path where classification already
     // ran off-main via ProcessCallScheduler. Runs on main; dedups by pid so it can't race a parallel creation.
     private static func createActualApp(_ runningApp: NSRunningApplication, _ pid: pid_t) {
-        guard !(list.contains { $0.pid == pid }) else { return }
-        list.append(Application(runningApp, pid: pid))
+        guard !(list.contains { $0.pid == pid }), let app = makeLiveApplication(runningApp, pid) else { return }
+        list.append(app)
+    }
+
+    /// LaunchServices can retain exited apps in its bulk snapshot. Classification and AppKit property
+    /// reads can outlive a process, so both creation routes check kernel liveness at insertion too.
+    private static func makeLiveApplication(_ runningApp: NSRunningApplication, _ pid: pid_t) -> Application? {
+        guard pid.isAlive(), !pid.isZombie() else { return nil }
+        let app = Application(runningApp, pid: pid)
+        guard pid.isAlive(), !pid.isZombie() else {
+            AttentionEngine.processExited(pid)
+            return nil
+        }
+        return app
     }
 
     static func removeRunningApplications(_ terminatingApps: [NSRunningApplication]) {
@@ -1304,7 +1317,7 @@ class Applications {
         if let app = (list.first { $0.pid == pid }) { return app }
         // A WindowServer row can name pid 0 (no owner). Asking LaunchServices about it fails 1,078 times a
         // pass and can never do anything else.
-        guard pid > 0 else { return nil }
+        guard pid.isAlive(), !pid.isZombie() else { return nil }
         guard let runningApp = NSRunningApplication(processIdentifier: pid) else {
             Logger.debug { "NSRunningApplication init failed for pid:\(pid)" }
             return nil
@@ -1321,7 +1334,7 @@ class Applications {
             return nil
         }
         refusedByDiscovery[pid] = nil
-        let app = Application(runningApp, pid: pid)
+        guard let app = makeLiveApplication(runningApp, pid) else { return nil }
         list.append(app)
         return app
     }
