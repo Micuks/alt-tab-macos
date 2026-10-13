@@ -21,3 +21,4 @@ codesign.p12
 /scripts/l10n/missing-translations.json
 /scripts/fork/__pycache__/
 /ai/output/
+/profile_output/

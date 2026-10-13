@@ -39,6 +39,7 @@ class WindowCaptureScreenshots {
     /// `fullRes: false` = thumbnail-scale captures, delivered to `Window.thumbnail`.
     /// `fullRes: true` = full-resolution Preview frames, delivered to the session's capped cache (#5861).
     static func oneTimeScreenshots(_ windowsToScreenshot: [Window], _ source: RefreshCausedBy, prioritizedIds: Set<CGWindowID>? = nil, fullRes: Bool = false) {
+        guard WindowThumbnails.capturesAreAllowed(fullRes: fullRes) else { return }
         // Snapshot Window state on the main thread before hopping to screenshotsQueue. Windows.byWindowId,
         // Window.size, Window.screenId, Screens.all, and NSScreen.preferred are plain (lock-free) dictionaries
         // and mutable properties touched only on main; reading them from screenshotsQueue (8-way concurrent)
@@ -55,7 +56,7 @@ class WindowCaptureScreenshots {
         guard !requests.isEmpty else { return }
         let prioritized = prioritizedIds ?? []
         BackgroundWork.screenshotsQueue.addOperation {
-            guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+            guard WindowThumbnails.capturesAreAllowed(fullRes: fullRes) else { return }
             let (cachedWindows, notCachedWindows) = sortCachedAndNotCached(Array(requests.keys))
             Logger.debug { "cached:\(cachedWindows.map { $0.windowID }) notCached:\(notCachedWindows)" }
             // iterate prioritized windows first so they enqueue (and grab queue slots) ahead of the rest
@@ -140,7 +141,7 @@ class WindowCaptureScreenshots {
             return true
         }
         for (key, capture) in pending.sorted(by: { $0.value.prioritized && !$1.value.prioritized }) {
-            guard capture.source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { continue }
+            guard WindowThumbnails.capturesAreAllowed(fullRes: capture.request.fullRes) else { continue }
             if let window = windowsById[key.wid] {
                 oneTimeCapture(window, capture.request, capture.source, capture.prioritized)
             } else {
@@ -185,17 +186,14 @@ class WindowCaptureScreenshots {
         let keyPrefix = request.fullRes ? "preview" : "capture"
         // [weak window] avoids keeping a closed Window alive while the capture is queued or in-flight with the OS
         Applications.screenshotThrottler.throttleOrProceed(key: "\(keyPrefix)-wid-\(scWindow.windowID)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window = request.window] in
-            guard !ActiveWindowCaptures.isTerminating, !ScreenLockEvents.isScreenLocked, let window else { return }
+            guard !ActiveWindowCaptures.isTerminating, WindowThumbnails.capturesAreAllowed(fullRes: request.fullRes),
+                  let window else { return }
             let config = SCStreamConfiguration.forWindow(size, scaleFactor, request.fullRes)
             let filter = SCContentFilter(desktopIndependentWindow: scWindow)
             // These APIs return before the OS answers, so `screenshotsQueue` cannot bound their concurrency.
             // The gate limits bursts that can wedge replayd machine-wide (#5861).
             ActiveWindowCaptures.run { finish in
-                guard !ActiveWindowCaptures.isTerminating, !ScreenLockEvents.isScreenLocked else {
-                    finish()
-                    return
-                }
-                guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else {
+                guard !ActiveWindowCaptures.isTerminating, WindowThumbnails.capturesAreAllowed(fullRes: request.fullRes) else {
                     finish()
                     return
                 }
@@ -277,7 +275,7 @@ class WindowCaptureScreenshotsPrivateApi {
             guard let wid = window.cgWindowId else { continue }
             let isPrioritized = prioritized.contains(wid)
             Applications.screenshotThrottler.throttleOrProceed(key: "capture-wid-\(wid)", queue: BackgroundWork.screenshotsQueue, priority: isPrioritized ? .high : .normal) { [weak window] in
-                guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
+                guard !ActiveWindowCaptures.isTerminating, WindowThumbnails.capturesAreAllowed() else { return }
                 guard let wid = window?.cgWindowId, let cgImage = oneTimeCapture(wid) else { return }
                 guard source != .refreshOnlyThumbnailsAfterShowUi || SwitcherSession.isActive else { return }
                 DispatchQueue.main.async { [weak window] in

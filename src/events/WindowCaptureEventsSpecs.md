@@ -42,9 +42,11 @@ Fullscreen windows use `captureSampleBuffer` because the screenshot API fails wh
   next ordinary refresh rather than allowing an exotic desktop to grow queues without limit.
 - The capture gate permits at most 2 requests in flight. The OS serves screenshot requests one at a time, so
   on macOS 27 a summon over 43 windows finished in the same 1.7s with any cap from 2 to 16 (2.1s with 1),
-  while a higher cap only made each capture wait longer inside the OS. A thumbnail-only request is checked
-  again when it reaches that gate, so work queued for a switcher session that has since ended does not
-  reach the OS.
+  while a higher cap only made each capture wait longer inside the OS. All request sources check the live
+  capture policy when throttling, discovery and gate waits finish. With background captures disabled,
+  closing the switcher prevents any queued thumbnail from entering either screenshot API. Full-resolution
+  Preview requests require a live switcher even when background captures are enabled. An already-sent OS
+  request cannot be cancelled.
 
 ## Edge cases
 
