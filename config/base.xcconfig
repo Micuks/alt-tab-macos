@@ -25,5 +25,5 @@ DEAD_CODE_STRIPPING = YES
 OTHER_LDFLAGS = $(inherited) -weak_framework ScreenCaptureKit // SDK 26 header bug: a stray `;` between API_AVAILABLE and `@interface SCScreenshotConfiguration` detaches the annotation, so the class ref links strongly and dyld aborts at launch on any macOS below 26
 DOMAIN = alt-tab.app
 API_DOMAIN = alt-tab.app/api
-CURRENT_PROJECT_VERSION = 11.9.1
-MARKETING_VERSION = 11.9.1
+CURRENT_PROJECT_VERSION = 11.9.2
+MARKETING_VERSION = 11.9.2
