@@ -31,6 +31,7 @@ class App: AppCenterApplication {
     /// (`showUiOrCycleSelection`). One inventory lands ~280ms after it is asked for, measured.
     private static let launchInventoryGraceInMs = 400
     private static var pendingShowSettingsWindow = false
+    private static var firstLaunchSettingsObserver: NSObjectProtocol?
     /// Written once and never read: AppCenter holds its delegate weakly, so this is the strong reference
     /// that keeps the crash handler alive for the process lifetime.
     // periphery:ignore
@@ -82,6 +83,7 @@ class App: AppCenterApplication {
         MainThreadStall.step()
         Logger.debug { "active:\(SwitcherSession.isActive)" }
         guard SwitcherSession.current != nil else { return false } // already hidden
+        DismissalInput.begin()
         SwitcherSession.current = nil
         // The badge read only runs while a session is open, so once this one closes its quiet period has no
         // next call left to throttle: all it can still do is delay the FIRST read of the next session by up
@@ -99,23 +101,28 @@ class App: AppCenterApplication {
         return true
     }
 
-    /// The rest of the dismissal, none of it visible. Kept behind the focus request because
-    /// `TilesView.endSearchSession` can stall on the OS text-input services (#5981).
+    /// Reset session state now; AppKit cleanup waits until the panel has given the keyboard back.
     private static func endHideUi() {
         MainThreadStall.step()
-        // Two event-server round trips (`tapIsEnabled`, then `tapEnable`), measured at up to 8ms on
-        // macOS 26.6.2. Behind the focus request rather than in front of it: the tap's callback already
-        // passes Esc through once `SwitcherSession.isActive` is false, so nothing absorbs a key in the gap.
-        KeyboardEvents.updateEscapeAbsorptionTap() // session closed: stop tapping keyDown (#5766)
         UsageStats.resetSession()
-        TilesView.endSearchSession()
         ContextMenuEvents.toggle(false)
-        CursorEvents.toggle(false)
         TrackpadEvents.reset()
-        Tooltips.hideAll()
-        MainMenu.toggle(true)
         ProTransitionManager.shared.onSwitcherDismissed()
         OnboardingPopover.switcherWasDismissed()
+        TilesPanel.shared.whenOrderedOut(finishHideUi)
+    }
+
+    private static func finishHideUi() {
+        MainThreadStall.step()
+        // Two event-server round trips (`tapIsEnabled`, then `tapEnable`), measured at up to 8ms on
+        // macOS 26.6.2. Behind the focus request rather than in front of it: the tap's callback passes Esc
+        // through once `SwitcherSession.isActive` is false. The local monitor discards keys still sent here.
+        KeyboardEvents.updateEscapeAbsorptionTap() // session closed: stop tapping keyDown (#5766)
+        TilesView.endSearchSession()
+        CursorEvents.toggle(false)
+        Tooltips.hideAll()
+        MainMenu.toggle(true)
+        ProTransitionManager.shared.refreshAfterSwitcherDismissal()
     }
 
     /// we don't want another window to become key when the TilesPanel is hidden
@@ -190,6 +197,9 @@ class App: AppCenterApplication {
     }
 
     static func showSecondaryWindow(_ window: NSWindow) {
+        DismissalInput.cancel()
+        ProPromptHost.windowPresentation.cancel()
+        ProPromptPopover.cancelPendingPresentations()
         NSScreen.updatePreferred()
         App.shared.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
@@ -238,23 +248,23 @@ class App: AppCenterApplication {
         let isNewUsersFirstLaunch = !Preferences.settingsWindowShownOnFirstLaunch && ProTransitionState.isFreshInstall
         let announcesTrial = willShowDay1WelcomeOnAppLaunch()
         guard isNewUsersFirstLaunch,
-              OnboardingPopover.show(trialDaysToAnnounce: announcesTrial ? trialDaysRemaining() : nil) else {
+              OnboardingPopover.show(announcesTrial: announcesTrial) else {
             showSettingsWindowOnFirstLaunchIfNeeded()
             return
         }
         ProTransitionManager.shared.state.onboardingInProgress = true
     }
 
-    private static func trialDaysRemaining() -> Int? {
-        LicenseManager.shared.refreshState()
-        guard case .trial(let daysRemaining) = LicenseManager.shared.state else { return nil }
-        return daysRemaining
-    }
-
     @discardableResult
     private static func showSettingsWindowOnFirstLaunchIfNeeded() -> Bool {
         guard !Preferences.settingsWindowShownOnFirstLaunch else { return false }
-        showAndCenterSettingsWindowOnFirstLaunch()
+        // If the Day1 Welcome window will be shown on this launch, wait for the user to close it
+        // before showing Settings — otherwise both windows appear stacked.
+        if willShowDay1WelcomeOnAppLaunch() {
+            deferFirstLaunchSettingsUntilDay1WelcomeCloses()
+        } else {
+            showAndCenterSettingsWindowOnFirstLaunch()
+        }
         return true
     }
 
@@ -262,8 +272,18 @@ class App: AppCenterApplication {
     /// "now" for the Welcome prompt. Kept narrow on purpose: the other Day-X prompts are gated by
     /// trial age and don't fire on the very first launch.
     private static func willShowDay1WelcomeOnAppLaunch() -> Bool {
-        if case .pro = LicenseManager.shared.state { return false }
+        guard case .trial = LicenseManager.shared.state else { return false }
         return !ProTransitionManager.shared.hasSeenWelcome
+    }
+
+    private static func deferFirstLaunchSettingsUntilDay1WelcomeCloses() {
+        NotificationCenter.default.removeObserver(&firstLaunchSettingsObserver)
+        firstLaunchSettingsObserver = NotificationCenter.default.addObserver(
+            forName: NSPopover.didCloseNotification, object: nil, queue: .main) { notification in
+            guard Day1WelcomeLetterPopover.owns(notification.object) else { return }
+            NotificationCenter.default.removeObserver(&firstLaunchSettingsObserver)
+            DispatchQueue.main.async { showAndCenterSettingsWindowOnFirstLaunch() }
+        }
     }
 
     private static func showAndCenterSettingsWindowOnFirstLaunch() {
@@ -367,6 +387,7 @@ class App: AppCenterApplication {
 
     static func showUiOrCycleSelection(_ shortcutIndex: Int, _ forceDoNothingOnRelease_: Bool) {
         MainThreadStall.step()
+        if !SwitcherSession.isActive { DismissalInput.cancel() }
         OnboardingPopover.switcherWasSummoned()
         let session = SwitcherSession.current ?? {
             let new = SwitcherSession()
@@ -456,6 +477,14 @@ class App: AppCenterApplication {
         KeyRepeatTimer.startRepeatingKeyNextWindow()
         let prioritizedIds = TilesView.windowIdsInViewport()
         WindowThumbnails.refreshAsync(Windows.list, .refreshOnlyThumbnailsAfterShowUi, prioritizedIds: prioritizedIds)
+        #if DEBUG
+        let shownSession = SwitcherSession.current
+        // CoreAnimation cannot commit the first frame until this main-runloop turn ends.
+        DispatchQueue.main.async { [weak shownSession] in
+            guard let shownSession, SwitcherSession.current === shownSession else { return }
+            Logger.debug { "show[firstFrameReady]" }
+        }
+        #endif
     }
 
     static func checkIfShortcutsShouldBeDisabled(_ activeWindow: Window?, _ activeApp: Application?) {
@@ -556,7 +585,11 @@ class App: AppCenterApplication {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { App.updaterController?.startUpdater() }
         #endif
         PreferencesEvents.initialize()
+        #if DEBUG
         BenchmarkRunner.startIfNeeded()
+        #endif
+        LicenseManager.shared.onAppBecameUsable(accessibility: AccessibilityPermission.status,
+                                               screenRecording: ScreenRecordingPermission.status)
         endFirstLaunchWithPopoverOrSettings()
         if pendingShowSettingsWindow {
             pendingShowSettingsWindow = false
@@ -585,6 +618,9 @@ extension App: NSApplicationDelegate {
         App.shared.disableRelaunchOnLogin()
         Logger.initialize()
         MainThreadStall.observe()
+        #if DEBUG
+        MainThreadWatchdog.start()
+        #endif
         Logger.info { "Launching AltTab \(App.version)" }
         // Create the background queues first, before anything that can pump the main run loop re-entrantly
         // (the "move to /Applications" modal below, the WindowServer tap's discovery). Window.init reads
@@ -624,6 +660,9 @@ extension App: NSApplicationDelegate {
         WindowServerEvents.observe()
         AXUIElement.setGlobalTimeout()
         PreferencesPersistenceCheck.runInBackground()
+        LicenseManager.shared.onActivationSucceeded = {
+            DispatchQueue.main.async { ProActivationPopover.show() }
+        }
         LicenseManager.shared.onBeforeProUnlock = {
             if !LicenseManager.shared.isMocked { ProTransitionManager.shared.onProUnlocked() }
         }
