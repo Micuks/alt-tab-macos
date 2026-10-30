@@ -9,6 +9,11 @@ final class Window {
     var isWindowlessApp = false
     var isFullscreen = false
     var thumbnail: CALayerContents?
+    var capturedArea: CGRect?
+    var frame: CGRect? {
+        guard let position, let size else { return nil }
+        return CGRect(origin: position, size: size)
+    }
     var debugId: String { String(cgWindowId ?? 0) }
     init(_ wid: CGWindowID) { cgWindowId = wid }
 }
@@ -18,7 +23,7 @@ enum CALayerContents {
 }
 final class Session {
     var shortcutIndex = 0
-    func previewFrame(_ wid: CGWindowID) -> CALayerContents? { nil }
+    func previewFrame(_ wid: CGWindowID) -> (contents: CALayerContents, area: CGRect?)? { nil }
     func hasPreviewFrame(_ wid: CGWindowID) -> Bool { false }
 }
 enum SwitcherSession {
@@ -49,7 +54,7 @@ final class TilesPanel {
 }
 enum PreviewPanel {
     static func hide() { }
-    static func show(_ wid: CGWindowID, _ contents: CALayerContents, _ position: CGPoint, _ size: CGSize) { }
+    static func show(_ id: CGWindowID, _ preview: CALayerContents, _ area: CGRect) { }
 }
 enum RefreshCausedBy { case refreshUiAfterExternalEvent, refreshOnlyThumbnailsAfterShowUi }
 enum Logger { static func debug(_ text: () -> String) { } }
